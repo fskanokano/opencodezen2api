@@ -39,6 +39,12 @@ fi
 
 # 清理旧包
 rm -f "$OUT"
+# 修复历史遗留的 /tmp/pack.log 权限问题（旧版硬编码导致 root 占用）
+if [[ -f /tmp/pack.log && ! -w /tmp/pack.log ]]; then
+  sudo rm -f /tmp/pack.log 2>/dev/null || rm -f /tmp/pack.log 2>/dev/null || true
+fi
+TMPLOG=$(mktemp /tmp/pack-XXXXXX.log 2>/dev/null || mktemp -t pack-XXXXXX.log 2>/dev/null || echo "$ROOT_DIR/.pack.log")
+trap 'rm -f "$TMPLOG" 2>/dev/null || true' EXIT
 
 # 临时排除文件：若用户在本地有 .env / config.json 等敏感文件，不打进去
 echo "  → 创建 $OUT …"
@@ -58,23 +64,31 @@ if [[ "$WITH_NODE_MODULES" == true ]]; then
     echo "  → 补充 serverless-http ..."
     npm install --save serverless-http --ignore-scripts 2>&1 | tail -n 5 || true
   fi
-  zip -r "$OUT" \
+  if ! zip -r "$OUT" \
     handler.js \
     package.json \
     package-lock.json \
     src \
     node_modules \
     -x "node_modules/.cache/*" "node_modules/.bin/*" "*.log" ".git/*" \
-    > /tmp/pack.log 2>&1 || { cat /tmp/pack.log; echo -e "${RED}✗ zip 失败${NC}"; exit 1; }
+    > "$TMPLOG" 2>&1; then
+    cat "$TMPLOG" 2>/dev/null || true
+    echo -e "${RED}✗ zip 失败${NC}"
+    exit 1
+  fi
 else
   # 极简模式：仅源码 + package.json，Scaleway 部署时自动 npm install
   # 注意：必须包含 package.json 以便平台安装 serverless-http/express 等
-  zip -r "$OUT" \
+  if ! zip -r "$OUT" \
     handler.js \
     package.json \
     src \
     -x "*.log" ".git/*" \
-    > /tmp/pack.log 2>&1 || { cat /tmp/pack.log; echo -e "${RED}✗ zip 失败${NC}"; exit 1; }
+    > "$TMPLOG" 2>&1; then
+    cat "$TMPLOG" 2>/dev/null || true
+    echo -e "${RED}✗ zip 失败${NC}"
+    exit 1
+  fi
   # 可选：带上 lock 以保证版本一致
   if [[ -f package-lock.json ]]; then
     zip -u "$OUT" package-lock.json >/dev/null 2>&1 || true
