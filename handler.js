@@ -1,5 +1,4 @@
-import { createApp } from './src/proxy.js';
-import { buildConfig, isScalewayFunctionEnv } from './src/config.js';
+import { buildConfig } from './src/config.js';
 import { pathToFileURL } from 'url';
 
 // Lazy singleton app for cold-start reuse
@@ -14,6 +13,7 @@ async function getApp() {
     if (cached && cachedConfig) return cached;
     const config = getConfigFromEnv();
     cachedConfig = config;
+    const { createApp } = await import('./src/proxy.js');
     const { app } = createApp(config);
     cached = app;
     // Warm backend asynchronously but don't block first request beyond health check
@@ -104,7 +104,7 @@ async function directZenProxy(event) {
     const method = (event.httpMethod || 'GET').toUpperCase();
     const path = event.path || '/';
     const isModels = path === '/v1/models' && method === 'GET';
-    const isHealth = path === '/health' && method === 'GET';
+    const isHealth = (path === '/health' || path === '/' ) && method === 'GET';
     const isChat = path === '/v1/chat/completions' && method === 'POST';
     const isResponses = path === '/v1/responses' && method === 'POST';
     const isMessages = path === '/v1/messages' && method === 'POST';
