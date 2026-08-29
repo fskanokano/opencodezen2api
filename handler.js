@@ -102,41 +102,47 @@ function normalizeScalewayEvent(event) {
 async function directZenProxy(event) {
     const zenKey = process.env.OPENCODE_ZEN_API_KEY || 'public';
     const method = (event.httpMethod || 'GET').toUpperCase();
-    const path = event.path || '/';
-    const isModels = path === '/v1/models' && method === 'GET';
+    let path = event.path || '/';
+    // 规范化：去除尾部斜杠（除根路径）
+    if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1);
     const isHealth = (path === '/health' || path === '/' ) && method === 'GET';
-    const isChat = path === '/v1/chat/completions' && method === 'POST';
-    const isResponses = path === '/v1/responses' && method === 'POST';
-    const isMessages = path === '/v1/messages' && method === 'POST';
     if (isHealth) {
         return {
             statusCode: 200,
-            headers: { 'Content-Type': 'application/json', 'X-Proxy-Mode': 'direct-zen' },
+            headers: { 'Content-Type': 'application/json', 'X-Proxy-Mode': 'direct-zen', 'X-Handler-Version': '67d3ac9-lazy' },
             body: JSON.stringify({ status: 'ok', proxy: true, mode: 'direct-zen', zen: !!process.env.OPENCODE_ZEN_API_KEY })
         };
     }
-    // 只对已知路径做直连，其它回退 404
+    // 通用直连：所有 /v1/* 直达 Zen，其它也尝试
+    // 参考官方：https://opencode.ai/docs/zen/ 端点均在 /zen/v1/*
     let upstreamPath = null;
-    if (isChat) upstreamPath = '/zen/v1/chat/completions';
-    else if (isResponses) upstreamPath = '/zen/v1/responses';
-    else if (isMessages) upstreamPath = '/zen/v1/messages';
-    else if (isModels) upstreamPath = '/zen/v1/models';
-    else return null;
+    if (path.startsWith('/v1/')) {
+        upstreamPath = `/zen${path}`;
+    } else if (path.startsWith('/zen/')) {
+        upstreamPath = path;
+    } else if (path === '/v1/models' || path.startsWith('/v1/models/')) {
+        upstreamPath = `/zen${path}`;
+    } else {
+        // 未知路径也尝试直连，避免回退到需 express 的 proxy
+        if (path.startsWith('/')) upstreamPath = `/zen${path}`;
+        else upstreamPath = `/zen/${path}`;
+    }
+    // 兼容旧严格判断，保留精确映射以便日志
+    if (!upstreamPath) return null;
 
-    const upstreamUrl = `https://opencode.ai${upstreamPath}`;
-    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${zenKey}` };
+    // 拼接 query
+    const qs = event.queryStringParameters ? '?' + new URLSearchParams(event.queryStringParameters).toString() : '';
+    const upstreamUrl = `https://opencode.ai${upstreamPath}${qs}`;
+    // 透传客户端 Content-Type，若无则默认 json
+    const contentType = (event.headers && (event.headers['content-type'] || event.headers['Content-Type'])) || 'application/json';
+    const headers = { 'Content-Type': contentType, 'Authorization': `Bearer ${zenKey}` };
+    // 透传其它必要头（如 accept），但过滤掉客户端的 Authorization（已替换为 Zen Key）
     const opts = { method, headers };
-    if (method === 'POST' && event.body) {
+    if (event.body) {
         let body = event.body;
         if (event.isBase64Encoded) {
             try { body = Buffer.from(body, 'base64').toString(); } catch (_) {}
         }
-        // 尝试 JSON 解析以做最小清洗（去除客户端的 Authorization 干扰）
-        try {
-            const j = JSON.parse(body);
-            // 若客户端传了自定义 model，保留；否则不改
-            body = JSON.stringify(j);
-        } catch (_) {}
         opts.body = body;
     }
     try {
@@ -223,6 +229,19 @@ export async function handle(event, context, callback) {
         return response;
     } catch (err) {
         console.error('[Handler] Fatal:', err);
+        // 若因缺失依赖（如 express）导致，且为直连可覆盖路径，尝试回退直连
+        const isMissingDep = err && err.message && (err.message.includes("Cannot find package 'express'") || err.code === 'ERR_MODULE_NOT_FOUND');
+        if (isMissingDep) {
+            try {
+                const direct = await directZenProxy(normalized);
+                if (direct) {
+                    if (!direct.headers['X-Proxy-Handler']) direct.headers['X-Proxy-Handler'] = 'scaleway-function';
+                    direct.headers['X-Fallback'] = 'missing-dep-direct';
+                    if (typeof callback === 'function') { callback(null, direct); return; }
+                    return direct;
+                }
+            } catch (_) {}
+        }
         const errorResponse = {
             statusCode: err.statusCode || 500,
             headers: { 'Content-Type': 'application/json', 'X-Error': 'handler' },
