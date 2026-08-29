@@ -1,0 +1,25 @@
+# scaleway.toml.example — 供 scw CLI / serverless-scaleway-functions 参考
+# 本项目优先使用 scripts/scaleway-interactive.sh 一键部署，此文件仅作文档/自定义部署参考
+
+# Serverless Framework 示例（serverless.yml）
+# service: opencode2api
+# provider:
+#   name: scaleway
+#   runtime: node22
+#   scwToken: ${env:SCW_SECRET_KEY}
+#   scwProject: ${env:SCW_PROJECT_ID}
+#   scwRegion: fr-par
+# functions:
+#   opencode2api:
+#     handler: handler.handle
+#     memoryLimit: 512
+#     timeout: 300s
+#     env:
+#       API_KEY: ${env:API_KEY}
+#       OPENCODE_ZEN_API_KEY: ${env:OPENCODE_ZEN_API_KEY}
+#       OPENCODE_SERVER_PASSWORD: ${env:OPENCODE_SERVER_PASSWORD}
+
+# 纯 scw CLI 示例：
+# scw functions namespace create name=opencode2api region=fr-par
+# scw functions function create name=opencode2api namespace-id=<ns-id> runtime=node22 handler=handler.handle memory-limit=512 timeout=300s region=fr-par env.API_KEY=xxx env.OPENCODE_ZEN_API_KEY=yyy
+# scw functions function deploy function-id=<fn-id> region=fr-par zip-file=function.zip
