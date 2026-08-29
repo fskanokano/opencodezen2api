@@ -70,7 +70,7 @@ ask() {
   else
     echo -ne "${CYAN}?${NC} ${prompt}: " >&2
   fi
-  read -r var || var=""
+  IFS= read -r var || var=""
   if [[ -z "$var" ]]; then var="$default"; fi
   echo "$var"
 }
@@ -86,9 +86,39 @@ ask_secret() {
   else
     echo -ne "${CYAN}?${NC} ${prompt}: " >&2
   fi
-  # masked input
-  read -rs var || var=""
-  echo "" >&2
+  echo -ne "${DIM}(输入隐藏，回车确认)${NC} " >&2
+  # 隐藏输入：成功则隐藏，失败回退可见
+  if IFS= read -rs var 2>/dev/null; then
+    echo "" >&2
+    if [[ -n "$var" ]]; then
+      echo -e "${DIM}  ✓ 已输入 ${#var} 字符（已隐藏）${NC}" >&2
+    elif [[ -n "$default" ]]; then
+      echo -e "${DIM}  ↳ 已保持原值${NC}" >&2
+    else
+      echo -e "${DIM}  ↳ 未输入${NC}" >&2
+    fi
+  else
+    # 回退：可见读取（如不支持 -s 或无 tty）
+    IFS= read -r var || var=""
+    echo -e "${DIM}  ↳ 已读取 ${#var} 字符${NC}" >&2
+  fi
+  if [[ -z "$var" ]]; then var="$default"; fi
+  echo "$var"
+}
+
+# 可见输入包装（用于 API_KEY / Zen Key，避免用户误以为键盘失灵）
+ask_visible() {
+  local prompt="$1" default="${2:-}" var
+  if [[ "$NON_INTERACTIVE" == true ]]; then
+    echo "$default"
+    return
+  fi
+  if [[ -n "$default" ]]; then
+    echo -ne "${CYAN}?${NC} ${prompt} ${DIM}[$default]${NC}: " >&2
+  else
+    echo -ne "${CYAN}?${NC} ${prompt}: " >&2
+  fi
+  IFS= read -r var || var=""
   if [[ -z "$var" ]]; then var="$default"; fi
   echo "$var"
 }
@@ -268,8 +298,9 @@ wizard() {
   echo -e "${YELLOW}1/3 API_KEY${NC} — 用于保护你的 OpenAI 兼容端点的 Bearer Token"
   log_info "客户端需 Header: Authorization: Bearer <API_KEY>"
   log_info "留空将自动生成 32  hex 随机串（推荐）"
+  log_info "提示：输入可见，回车确认"
   local api_key
-  api_key=$(ask_secret "请输入 API_KEY" "$cur_api")
+  api_key=$(ask_visible "请输入 API_KEY" "$cur_api")
   if [[ -z "$api_key" ]]; then
     api_key=$(generate_api_key)
     echo -e "${GREEN}  → 已生成随机 API_KEY: $api_key${NC}"
@@ -280,8 +311,9 @@ wizard() {
   echo -e "${YELLOW}2/3 OPENCODE_ZEN_API_KEY${NC} — OpenCode Zen 的付费/免费 Key"
   log_info "获取： https://opencode.ai/zen → 登录 → Copy API Key"
   log_info "留空则使用匿名免费档（每日约 200 请求 / \$0.30，IP限流，见 README）"
+  log_info "提示：输入可见（Zen Key 非高敏），回车确认"
   local zen_key
-  zen_key=$(ask_secret "请输入 OPENCODE_ZEN_API_KEY" "$cur_zen")
+  zen_key=$(ask_visible "请输入 OPENCODE_ZEN_API_KEY" "$cur_zen")
   if [[ -n "$zen_key" ]]; then
     validate_zen_key "$zen_key" || {
       if ! confirm "仍使用此 Zen Key?" "y"; then
