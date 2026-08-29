@@ -99,6 +99,67 @@ function normalizeScalewayEvent(event) {
  * Signature: handle(event, context, callback) -> { statusCode, headers, body }
  * Supports both async return and callback style.
  */
+async function directZenProxy(event) {
+    const zenKey = process.env.OPENCODE_ZEN_API_KEY || 'public';
+    const method = (event.httpMethod || 'GET').toUpperCase();
+    const path = event.path || '/';
+    const isModels = path === '/v1/models' && method === 'GET';
+    const isHealth = path === '/health' && method === 'GET';
+    const isChat = path === '/v1/chat/completions' && method === 'POST';
+    const isResponses = path === '/v1/responses' && method === 'POST';
+    const isMessages = path === '/v1/messages' && method === 'POST';
+    if (isHealth) {
+        return {
+            statusCode: 200,
+            headers: { 'Content-Type': 'application/json', 'X-Proxy-Mode': 'direct-zen' },
+            body: JSON.stringify({ status: 'ok', proxy: true, mode: 'direct-zen', zen: !!process.env.OPENCODE_ZEN_API_KEY })
+        };
+    }
+    // 只对已知路径做直连，其它回退 404
+    let upstreamPath = null;
+    if (isChat) upstreamPath = '/zen/v1/chat/completions';
+    else if (isResponses) upstreamPath = '/zen/v1/responses';
+    else if (isMessages) upstreamPath = '/zen/v1/messages';
+    else if (isModels) upstreamPath = '/zen/v1/models';
+    else return null;
+
+    const upstreamUrl = `https://opencode.ai${upstreamPath}`;
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${zenKey}` };
+    const opts = { method, headers };
+    if (method === 'POST' && event.body) {
+        let body = event.body;
+        if (event.isBase64Encoded) {
+            try { body = Buffer.from(body, 'base64').toString(); } catch (_) {}
+        }
+        // 尝试 JSON 解析以做最小清洗（去除客户端的 Authorization 干扰）
+        try {
+            const j = JSON.parse(body);
+            // 若客户端传了自定义 model，保留；否则不改
+            body = JSON.stringify(j);
+        } catch (_) {}
+        opts.body = body;
+    }
+    try {
+        const resp = await fetch(upstreamUrl, opts);
+        const text = await resp.text();
+        // 透传上游状态与 body
+        return {
+            statusCode: resp.status,
+            headers: {
+                'Content-Type': resp.headers.get('content-type') || 'application/json',
+                'X-Proxy-Mode': 'direct-zen'
+            },
+            body: text
+        };
+    } catch (e) {
+        return {
+            statusCode: 502,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ error: { message: `Direct Zen failed: ${e.message}`, type: 'zen_direct_error' } })
+        };
+    }
+}
+
 export async function handle(event, context, callback) {
     const start = Date.now();
     const normalized = normalizeScalewayEvent(event);
@@ -109,8 +170,38 @@ export async function handle(event, context, callback) {
     }
 
     try {
+        // 默认直连 Zen（后台管理已关闭），避免冷启动拉起 opencode
+        const manageBackendEnv = String(process.env.OPENCODE_PROXY_MANAGE_BACKEND || '').toLowerCase().trim();
+        const shouldDirect = !['true','1','yes','y','on'].includes(manageBackendEnv);
+        if (shouldDirect) {
+            const direct = await directZenProxy(normalized);
+            if (direct) {
+                if (!direct.headers['X-Proxy-Handler']) {
+                    direct.headers['X-Proxy-Handler'] = 'scaleway-function';
+                    direct.headers['X-Mode'] = 'direct-zen';
+                    direct.headers['X-Duration-Ms'] = String(Date.now() - start);
+                }
+                if (direct.body && typeof direct.body !== 'string') direct.body = JSON.stringify(direct.body);
+                if (typeof callback === 'function') { callback(null, direct); return; }
+                return direct;
+            }
+        }
         const handler = await getServerlessHandler();
-        const response = await handler(normalized, context);
+        let response = await handler(normalized, context);
+        // 若后端不可用（MANAGE_BACKEND=false 且无外部 backend），回退直连
+        const isBackendUnavailable = response.statusCode === 502 && typeof response.body === 'string' && response.body.includes('backend_unavailable');
+        if (isBackendUnavailable) {
+            const direct = await directZenProxy(normalized);
+            if (direct) {
+                if (!direct.headers['X-Proxy-Handler']) {
+                    direct.headers['X-Proxy-Handler'] = 'scaleway-function';
+                    direct.headers['X-Mode'] = 'direct-zen-fallback';
+                    direct.headers['X-Duration-Ms'] = String(Date.now() - start);
+                }
+                if (typeof callback === 'function') { callback(null, direct); return; }
+                return direct;
+            }
+        }
 
         // Ensure headers exist and add scaleway-friendly CORS if missing
         if (!response.headers) response.headers = {};

@@ -45,7 +45,8 @@ export function buildConfig(overrides = {}) {
         API_KEY: '',
         OPENCODE_SERVER_URL: `http://127.0.0.1:${process.env.OPENCODE_SERVER_PORT || 10001}`,
         OPENCODE_SERVER_PASSWORD: process.env.OPENCODE_SERVER_PASSWORD || '',
-        MANAGE_BACKEND: parseBool(process.env.OPENCODE_PROXY_MANAGE_BACKEND, isScalewayFunctionEnv() ? false : false),
+        // 默认关闭后台管理（用户明确不需要），Scaleway 下更是强制关闭
+        MANAGE_BACKEND: false,
         OPENCODE_PATH: 'opencode',
         BIND_HOST: '0.0.0.0',
         DISABLE_TOOLS: true,
@@ -247,10 +248,18 @@ export function buildConfig(overrides = {}) {
     };
 
     // Scaleway Functions: /tmp is only writable; opencode jail must use /tmp
+    // 同时默认关闭所有后台管理，保持无状态
     if (isScalewayFunctionEnv()) {
         finalConfig.USE_ISOLATED_HOME = true;
-        // Don't auto-cleanup aggressively in serverless (ephemeral)
-        finalConfig.AUTO_CLEANUP_CONVERSATIONS = parseBool(process.env.OPENCODE_PROXY_AUTO_CLEANUP_CONVERSATIONS, false);
+        finalConfig.AUTO_CLEANUP_CONVERSATIONS = false;
+        finalConfig.METRICS_ENABLED = false;
+        finalConfig.HEALTH_DETAILS_ENABLED = true;
+        // 强制关闭后端托管，用户已明确不需要
+        finalConfig.MANAGE_BACKEND = false;
+    }
+    // 全局默认：后台管理关闭（用户不需要）
+    if (process.env.OPENCODE_PROXY_MANAGE_BACKEND === undefined && fileConfig.MANAGE_BACKEND === undefined && overrides.MANAGE_BACKEND === undefined) {
+        finalConfig.MANAGE_BACKEND = false;
     }
 
     return finalConfig;
